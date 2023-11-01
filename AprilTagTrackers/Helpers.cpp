@@ -1,4 +1,6 @@
-#include "Helpers.h"
+#include "Helpers.hpp"
+
+#include "utils/Types.hpp"
 
 void drawMarker(cv::Mat frame, std::vector<cv::Point2f> corners, cv::Scalar color)
 {
@@ -8,19 +10,50 @@ void drawMarker(cv::Mat frame, std::vector<cv::Point2f> corners, cv::Scalar colo
     cv::line(frame, cv::Point2i(int(corners[3].x), int(corners[3].y)), cv::Point2i(int(corners[0].x), int(corners[0].y)), color, 2);
 }
 
+void DrawMarker(const cv::Mat& frame, const MarkerCorners2f& corners, const cv::Scalar& color)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        const int j = (i + 1) % 4;
+        cv::line(frame, cv::Point2i(corners[i]), cv::Point2i(corners[j]), color, 2);
+    }
+}
+
+void TransformMarkerSpace(const MarkerCorners3f& modelMarker, const RodrPose& boardToCam, const RodrPose& markerToCam, MarkerCorners3f& outMarker)
+{
+    const auto boardTransformInv = boardToCam.ToAffine3d().inv();
+    const auto targetTransform = markerToCam.ToAffine3d();
+
+    ATT_ASSERT(modelMarker.size() == math::NUM_CORNERS);
+    outMarker.resize(math::NUM_CORNERS);
+    for (auto outCorner = outMarker.begin(); const auto& modelCorner : modelMarker)
+    {
+        cv::Vec3d corner{modelCorner.x, modelCorner.y, modelCorner.z};
+        // multiply model marker corner with markers translation matrix to get its position in camera(global) space
+        corner = targetTransform * corner;
+        // multiply marker corner in camera space with the inverse of the translation matrix of our board to put it into local space of our board
+        corner = boardTransformInv * corner;
+
+        *outCorner = cv::Point3f(
+            static_cast<float>(corner[X]),
+            static_cast<float>(corner[Y]),
+            static_cast<float>(corner[Z]));
+        ++outCorner;
+    }
+}
+
 void transformMarkerSpace(std::vector<cv::Point3f> modelMarker, cv::Vec3d boardRvec, cv::Vec3d boardTvec, cv::Vec3d rvec, cv::Vec3d tvec, std::vector<cv::Point3f>* out)
 {
-    //if any button was pressed, we try to add visible markers to our board
+    // if any button was pressed, we try to add visible markers to our board
 
-    //convert the board rotation vector to rotation matrix
+    // convert the board rotation vector to rotation matrix
     cv::Mat rmat;
-    //for timing our detection
-    //start = clock();
+    // for timing our detection
+    // start = clock();
 
     cv::Rodrigues(boardRvec, rmat);
 
-
-    //with rotation matrix and translation vector we create the translation matrix
+    // with rotation matrix and translation vector we create the translation matrix
     cv::Mat mtranslation = cv::Mat_<double>(4, 4);
     for (int x = 0; x < 3; x++)
     {
@@ -36,8 +69,7 @@ void transformMarkerSpace(std::vector<cv::Point3f> modelMarker, cv::Vec3d boardR
     }
     mtranslation.at<double>(3, 3) = 1;
 
-
-    //othervise, we create our markers translation matrix
+    // othervise, we create our markers translation matrix
     cv::Mat rmatin;
     Rodrigues(rvec, rmatin);
 
@@ -58,27 +90,27 @@ void transformMarkerSpace(std::vector<cv::Point3f> modelMarker, cv::Vec3d boardR
 
     cv::Mat rpos = cv::Mat_<double>(4, 1);
 
-    //we transform our model marker from our marker space to board space
+    // we transform our model marker from our marker space to board space
     out->clear();
     for (int y = 0; y < modelMarker.size(); y++)
     {
-        //transform corner of model marker from vector to mat for calculation
+        // transform corner of model marker from vector to mat for calculation
         rpos.at<double>(0, 0) = modelMarker[y].x;
         rpos.at<double>(1, 0) = modelMarker[y].y;
         rpos.at<double>(2, 0) = modelMarker[y].z;
         rpos.at<double>(3, 0) = 1;
 
-        //multiply model marker corner with markers translation matrix to get its position in camera(global) space
+        // multiply model marker corner with markers translation matrix to get its position in camera(global) space
         rpos = mtranslationin * rpos;
-        //multiply marker corner in camera space with the inverse of the translation matrix of our board to put it into local space of our board
+        // multiply marker corner in camera space with the inverse of the translation matrix of our board to put it into local space of our board
         rpos = mtranslation.inv() * rpos;
 
-        //cout << ids[i] << " :: marker\n" << rpos << "\n";
+        // cout << ids[i] << " :: marker\n" << rpos << "\n";
 
         out->push_back(cv::Point3f(rpos.at<double>(0, 0), rpos.at<double>(1, 0), rpos.at<double>(2, 0)));
     }
 
-    //we add our marker corners to our board
+    // we add our marker corners to our board
 }
 
 void getMedianMarker(std::vector<std::vector<cv::Point3f>> markerList, std::vector<cv::Point3f>* median)
@@ -101,6 +133,40 @@ void getMedianMarker(std::vector<std::vector<cv::Point3f>> markerList, std::vect
         std::sort(pointsz.begin(), pointsz.end());
 
         median->push_back(cv::Point3f(pointsx[pointsx.size() / 2], pointsy[pointsy.size() / 2], pointsz[pointsz.size() / 2]));
+    }
+}
+
+namespace
+{
+template <std::ranges::range T>
+std::ranges::iterator_t<T> FindMedian(T& range)
+{
+    ATT_ASSERT(!std::empty(range));
+    auto middleIt = std::begin(range) + (std::size(range) / 2);
+    std::nth_element(std::begin(range), middleIt, std::end(range));
+    return middleIt;
+}
+} // namespace
+
+void FindMedianMarker(const std::vector<MarkerCorners3f>& markerList, MarkerCorners3f& outMedianMarker)
+{
+    std::vector<float> xComps(markerList.size());
+    std::vector<float> yComps(markerList.size());
+    std::vector<float> zComps(markerList.size());
+
+    outMedianMarker.resize(math::NUM_CORNERS);
+    for (Index cornerIdx = 0; cornerIdx < math::NUM_CORNERS; ++cornerIdx)
+    {
+        for (Index i = 0; i < static_cast<Index>(markerList.size()); ++i)
+        {
+            xComps[i] = markerList[i][cornerIdx].x;
+            yComps[i] = markerList[i][cornerIdx].y;
+            zComps[i] = markerList[i][cornerIdx].z;
+        }
+        outMedianMarker[cornerIdx] = cv::Point3f(
+            *FindMedian(xComps),
+            *FindMedian(yComps),
+            *FindMedian(zComps));
     }
 }
 
@@ -159,7 +225,7 @@ cv::Mat getSpaceCalib(cv::Vec3d rvec, cv::Vec3d tvec, double xOffset, double yOf
     }
     wtranslation.at<double>(3, 3) = 1;
     wtranslation = wtranslation.inv();
-    //we add the values we sent to our driver to our matrix
+    // we add the values we sent to our driver to our matrix
     wtranslation.at<double>(0, 3) += xOffset;
     wtranslation.at<double>(1, 3) += yOffset;
     wtranslation.at<double>(2, 3) += zOffset;
@@ -170,7 +236,7 @@ cv::Mat getSpaceCalib(cv::Vec3d rvec, cv::Vec3d tvec, double xOffset, double yOf
 cv::Mat getSpaceCalibEuler(cv::Vec3d rvec, cv::Vec3d tvec, double xOffset, double yOffset, double zOffset)
 {
     cv::Mat rmat;
-    //cv::Rodrigues(rvec, rmat);
+    // cv::Rodrigues(rvec, rmat);
     cv::Vec3f eulers = rvec;
     rmat = eulerAnglesToRotationMatrix(eulers);
     cv::Mat wtranslation = cv::Mat_<double>(4, 4);
@@ -187,8 +253,8 @@ cv::Mat getSpaceCalibEuler(cv::Vec3d rvec, cv::Vec3d tvec, double xOffset, doubl
         wtranslation.at<double>(3, x) = 0;
     }
     wtranslation.at<double>(3, 3) = 1;
-    //wtranslation = wtranslation.inv();
-    //we add the values we sent to our driver to our matrix
+    // wtranslation = wtranslation.inv();
+    // we add the values we sent to our driver to our matrix
     wtranslation.at<double>(0, 3) += xOffset;
     wtranslation.at<double>(1, 3) += yOffset;
     wtranslation.at<double>(2, 3) += zOffset;
@@ -200,25 +266,19 @@ cv::Mat getSpaceCalibEuler(cv::Vec3d rvec, cv::Vec3d tvec, double xOffset, doubl
 cv::Mat eulerAnglesToRotationMatrix(cv::Vec3f theta)
 {
     // Calculate rotation about x axis
-    cv::Mat R_x = (cv::Mat_<double>(3, 3) <<
-        1, 0, 0,
-        0, cos(theta[0]), -sin(theta[0]),
-        0, sin(theta[0]), cos(theta[0])
-        );
+    cv::Mat R_x = (cv::Mat_<double>(3, 3) << 1, 0, 0,
+                   0, cos(theta[0]), -sin(theta[0]),
+                   0, sin(theta[0]), cos(theta[0]));
 
     // Calculate rotation about y axis
-    cv::Mat R_y = (cv::Mat_<double>(3, 3) <<
-        cos(theta[1]), 0, sin(theta[1]),
-        0, 1, 0,
-        -sin(theta[1]), 0, cos(theta[1])
-        );
+    cv::Mat R_y = (cv::Mat_<double>(3, 3) << cos(theta[1]), 0, sin(theta[1]),
+                   0, 1, 0,
+                   -sin(theta[1]), 0, cos(theta[1]));
 
     // Calculate rotation about z axis
-    cv::Mat R_z = (cv::Mat_<double>(3, 3) <<
-        cos(theta[2]), -sin(theta[2]), 0,
-        sin(theta[2]), cos(theta[2]), 0,
-        0, 0, 1);
-
+    cv::Mat R_z = (cv::Mat_<double>(3, 3) << cos(theta[2]), -sin(theta[2]), 0,
+                   sin(theta[2]), cos(theta[2]), 0,
+                   0, 0, 1);
 
     // Combined rotation matrix
     cv::Mat R = R_y * R_x * R_z;
@@ -234,7 +294,7 @@ bool isRotationMatrix(cv::Mat& R)
     cv::Mat shouldBeIdentity = Rt * R;
     cv::Mat I = cv::Mat::eye(3, 3, shouldBeIdentity.type());
 
-    return  norm(I, shouldBeIdentity) < 1e-6;
+    return norm(I, shouldBeIdentity) < 1e-6;
 }
 
 // Calculates rotation matrix to euler angles
@@ -264,15 +324,18 @@ cv::Vec3f rotationMatrixToEulerAngles(cv::Mat& R)
     return cv::Vec3f(x, y, z);
 }
 
-inline double SIGN(double x) {
+inline double SIGN(double x)
+{
     return (x >= 0.0f) ? +1.0f : -1.0f;
 }
 
-inline double NORM(double a, double b, double c, double d) {
+inline double NORM(double a, double b, double c, double d)
+{
     return sqrt(a * a + b * b + c * c + d * d);
 }
 
-Quaternion<double> mRot2Quat(const cv::Mat& m) {
+Quaternion<double> mRot2Quat(const cv::Mat& m)
+{
     double r11 = m.at<double>(0, 0);
     double r12 = m.at<double>(0, 1);
     double r13 = m.at<double>(0, 2);
@@ -286,47 +349,56 @@ Quaternion<double> mRot2Quat(const cv::Mat& m) {
     double q1 = (r11 - r22 - r33 + 1.0f) / 4.0f;
     double q2 = (-r11 + r22 - r33 + 1.0f) / 4.0f;
     double q3 = (-r11 - r22 + r33 + 1.0f) / 4.0f;
-    if (q0 < 0.0f) {
+    if (q0 < 0.0f)
+    {
         q0 = 0.0f;
     }
-    if (q1 < 0.0f) {
+    if (q1 < 0.0f)
+    {
         q1 = 0.0f;
     }
-    if (q2 < 0.0f) {
+    if (q2 < 0.0f)
+    {
         q2 = 0.0f;
     }
-    if (q3 < 0.0f) {
+    if (q3 < 0.0f)
+    {
         q3 = 0.0f;
     }
     q0 = sqrt(q0);
     q1 = sqrt(q1);
     q2 = sqrt(q2);
     q3 = sqrt(q3);
-    if (q0 >= q1 && q0 >= q2 && q0 >= q3) {
+    if (q0 >= q1 && q0 >= q2 && q0 >= q3)
+    {
         q0 *= +1.0f;
         q1 *= SIGN(r32 - r23);
         q2 *= SIGN(r13 - r31);
         q3 *= SIGN(r21 - r12);
     }
-    else if (q1 >= q0 && q1 >= q2 && q1 >= q3) {
+    else if (q1 >= q0 && q1 >= q2 && q1 >= q3)
+    {
         q0 *= SIGN(r32 - r23);
         q1 *= +1.0f;
         q2 *= SIGN(r21 + r12);
         q3 *= SIGN(r13 + r31);
     }
-    else if (q2 >= q0 && q2 >= q1 && q2 >= q3) {
+    else if (q2 >= q0 && q2 >= q1 && q2 >= q3)
+    {
         q0 *= SIGN(r13 - r31);
         q1 *= SIGN(r21 + r12);
         q2 *= +1.0f;
         q3 *= SIGN(r32 + r23);
     }
-    else if (q3 >= q0 && q3 >= q1 && q3 >= q2) {
+    else if (q3 >= q0 && q3 >= q1 && q3 >= q2)
+    {
         q0 *= SIGN(r21 - r12);
         q1 *= SIGN(r31 + r13);
         q2 *= SIGN(r32 + r23);
         q3 *= +1.0f;
     }
-    else {
+    else
+    {
         printf("coding error\n");
     }
     double r = NORM(q0, q1, q2, q3);

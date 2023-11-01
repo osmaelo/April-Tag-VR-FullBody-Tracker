@@ -1,211 +1,108 @@
-#include "Connection.h"
-#include "GUI.h"
-#include "Helpers.h"
-#include "MyApp.h"
-#include "Parameters.h"
-#include "Tracker.h"
-wxIMPLEMENT_APP(MyApp);
+#include "MyApp.hpp"
+
+#include "utils/Assert.hpp"
+#include "utils/Log.hpp"
+
+#include <opencv2/core/utils/logger.hpp>
+
+wxIMPLEMENT_APP(MyApp); // NOLINT
 
 int MyApp::OnExit()
 {
-    tracker->cameraRunning = false;
-    tracker->mainThreadRunning = false;
-    sleep_millis(2000);
+    tracker->Stop();
+
+    if (envVars.IsRedirectConsoleToFile())
+    {
+        logFileHandler.CloseAndTimestampFile();
+    }
     return 0;
 }
 
 bool MyApp::OnInit()
 {
-    params = new Parameters();
-    conn = new Connection(params);
-    tracker = new Tracker(params, conn, this);
-    
+    utils::RegisterThisThreadName("Main");
 
-    gui = new GUI(params->language.APP_TITLE + " [" + params->octiuSah + "]", params, conn);
+    // OnAssertFailure(const wxChar* file, int line, const wxChar* func, const wxChar* cond, const wxChar* msg);
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_INFO);
 
-    conn->gui = gui; // juice told me to write this, dont blame me 
+    if (envVars.IsRedirectConsoleToFile())
+    {
+        logFileHandler.RedirectConsoleToFile();
+    }
+    ATT_LOG_INFO("Starting AprilTagTrackers");
 
-    gui->Show(true);
+    userConfig.Load();
 
-    gui->posHbox->Show(false);
-    gui->rotHbox->Show(false);
-    tracker->gui = gui;
+    // The next two lines were added as a quick fix. The two options should be handeled differently from other parameters, so as a quick fix, they are reset on every launch of ATT.
+    // since disable openvr api isnt part of the parameters, it isnt loaded properly. This ensures it is globaly disabled on every launch.
+    userConfig.disableOpenVrApi = false;
 
-    Connect(GUI::CAMERA_BUTTON, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedCamera));
-    Connect(GUI::CAMERA_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedCameraPreview));
-    Connect(GUI::CAMERA_CALIB_BUTTON, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedCameraCalib));
-    Connect(GUI::CAMERA_CALIB_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedCameraCalibPreview));
-    //Connect(GUI::TIME_PROFILE_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedTimeProfile));
-    Connect(GUI::CONNECT_BUTTON, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedConnect));
-    Connect(GUI::TRACKER_CALIB_BUTTON, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedTrackerCalib));
-    Connect(GUI::START_BUTTON, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedStart));
-    Connect(GUI::SPACE_CALIB_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedSpaceCalib));
-    Connect(GUI::MANUAL_CALIB_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedSpaceCalib));
-    Connect(GUI::MULTICAM_AUTOCALIB_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedMulticamAutocalib));
-    Connect(GUI::LOCK_HEIGHT_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedLockHeight));
-    Connect(GUI::DISABLE_OUT_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedDisableOut));
-    Connect(GUI::DISABLE_OPENVR_API_CHECKBOX, wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler(MyApp::ButtonPressedDisableOpenVrApi));
+    userConfig.calib.Load();
+    arucoConfig.Load();
+    lc.LoadLang(userConfig.langCode);
+
+    tracker = std::make_unique<Tracker>(userConfig, userConfig.calib, arucoConfig, lc);
+    gui = std::make_unique<GUI>(tracker, lc, userConfig);
 
     return true;
 }
 
-void MyApp::ButtonPressedCamera(wxCommandEvent& event)
+#ifdef ATT_DEBUG
+
+#    define ATT_FATAL_EXCEPTION(p_throwExpr, p_context)            \
+        do                                                         \
+        {                                                          \
+            try                                                    \
+            {                                                      \
+                (p_throwExpr);                                     \
+            }                                                      \
+            catch (const std::exception& exc)                      \
+            {                                                      \
+                ATT_LOG_ERROR(p_context, ": ", exc.what());        \
+                ATT_ABORT();                                       \
+            }                                                      \
+            catch (...)                                            \
+            {                                                      \
+                ATT_LOG_ERROR(p_context, ": malformed exception"); \
+                ATT_ABORT();                                       \
+            }                                                      \
+            ATT_LOG_ERROR(p_context, ": expected exception");      \
+            ATT_ABORT();                                           \
+        } while (false)
+
+void MyApp::OnFatalException()
 {
-    tracker->StartCamera(params->cameraAddr, params->cameraApiPreference);
+    ATT_FATAL_EXCEPTION(RethrowStoredException(), "wxApp::OnFatalException");
+}
+void MyApp::OnUnhandledException()
+{
+    ATT_FATAL_EXCEPTION(RethrowStoredException(), "wxApp::OnUnhandledException");
+}
+bool MyApp::OnExceptionInMainLoop()
+{
+    ATT_FATAL_EXCEPTION(RethrowStoredException(), "wxApp::OnExceptionInMainLoop");
 }
 
-void MyApp::ButtonPressedCameraPreview(wxCommandEvent& event)
+// cv::ErrorCallback
+static int OpenCVErrorHandler(int status, const char* funcName, const char* errMsg, const char* fileName, int line, void*)
 {
-    tracker->previewCamera = event.IsChecked();
+    ATT_LOG_ERROR_AT(fileName, line, "OpenCV Error(", status, "): ", errMsg, "\nin  ", funcName);
+    ATT_ABORT();
 }
 
-void MyApp::ButtonPressedCameraCalib(wxCommandEvent& event)
+// wxAssertHandler_t
+static void wxWidgetsAssertHandler(const wxString& file, int line, const wxString& func, const wxString& cond, const wxString& msg)
 {
-    tracker->StartCameraCalib();
+    ATT_LOG_ERROR_AT(file.c_str().AsChar(), line, "wxWidgets Error: ", msg,
+                     "\nassertion failure  ( ", cond, " )  in  ", func);
+    ATT_ABORT();
 }
 
-void MyApp::ButtonPressedCameraCalibPreview(wxCommandEvent& event)
+static inline const bool overrideErrorHandlers = []
 {
-    tracker->previewCameraCalibration = event.IsChecked();
-}
+    cv::redirectError(&OpenCVErrorHandler);
+    wxSetAssertHandler(&wxWidgetsAssertHandler);
+    return true;
+}();
 
-void MyApp::ButtonPressedTimeProfile(wxCommandEvent& event)
-{
-    tracker->showTimeProfile = event.IsChecked();
-}
-
-void MyApp::ButtonPressedConnect(wxCommandEvent& event)
-{
-    conn->StartConnection();
-}
-
-void MyApp::ButtonPressedTrackerCalib(wxCommandEvent& event)
-{
-    tracker->StartTrackerCalib();
-}
-
-void MyApp::ButtonPressedStart(wxCommandEvent& event)
-{
-    tracker->Start();
-}
-
-void MyApp::ButtonPressedMulticamAutocalib(wxCommandEvent& event)
-{
-    if (event.IsChecked())
-    {
-        tracker->multicamAutocalib = true;
-    }
-    else
-    {
-        tracker->multicamAutocalib = false;
-    }
-}
-
-void MyApp::ButtonPressedLockHeight(wxCommandEvent& event)
-{
-    if (event.IsChecked())
-    {
-        tracker->lockHeightCalib = true;
-    }
-    else
-    {
-        tracker->lockHeightCalib = false;
-    }
-}
-
-void MyApp::ButtonPressedDisableOut(wxCommandEvent& event)
-{
-    if (event.IsChecked())
-    {
-        tracker->disableOut = true;
-    }
-    else
-    {
-        tracker->disableOut = false;
-    }
-}
-
-void MyApp::ButtonPressedDisableOpenVrApi(wxCommandEvent& event)
-{
-    if (event.IsChecked())
-    {
-        tracker->disableOpenVrApi = true;
-        conn->disableOpenVrApi = true;
-    }
-    else
-    {
-        tracker->disableOpenVrApi = false;
-        conn->disableOpenVrApi = false;
-    }
-}
-
-void MyApp::ButtonPressedSpaceCalib(wxCommandEvent& event)
-{
-    if (event.GetId() == GUI::SPACE_CALIB_CHECKBOX)
-    {
-        //deprecated
-        if (event.IsChecked())
-        {
-            tracker->recalibrate = true;
-            gui->posHbox->Show(true);
-            gui->rotHbox->Show(false);
-            gui->cb3->SetValue(false);
-            tracker->manualRecalibrate = false;
-
-            gui->manualCalibX->SetValue(params->calibOffsetX);
-            gui->manualCalibY->SetValue(params->calibOffsetY);
-            gui->manualCalibZ->SetValue(params->calibOffsetZ);
-
-        }
-        else
-        {
-            params->wrotation = tracker->wrotation;
-            params->wtranslation = tracker->wtranslation;
-            params->calibOffsetX = gui->manualCalibX->value;
-            params->calibOffsetY = gui->manualCalibY->value;
-            params->calibOffsetZ = gui->manualCalibZ->value;
-            params->Save();
-            tracker->recalibrate = false;
-            gui->posHbox->Show(false);
-            gui->rotHbox->Show(false);
-        }
-    }
-    if (event.GetId() == GUI::MANUAL_CALIB_CHECKBOX)
-    {
-        if (event.IsChecked())
-        {
-            gui->posHbox->Show(true);
-            gui->rotHbox->Show(true);
-            //gui->cb2->SetValue(false);
-            tracker->recalibrate = false;
-
-            gui->manualCalibX->SetValue(params->calibOffsetX);
-            gui->manualCalibY->SetValue(params->calibOffsetY);
-            gui->manualCalibZ->SetValue(params->calibOffsetZ);
-            gui->manualCalibA->SetValue(params->calibOffsetA);
-            gui->manualCalibB->SetValue(params->calibOffsetB);
-            gui->manualCalibC->SetValue(params->calibOffsetC);
-
-            tracker->calibScale = params->calibScale;
-
-            tracker->manualRecalibrate = true;
-        }
-        else
-        {
-            params->wrotation = tracker->wrotation;
-            params->wtranslation = tracker->wtranslation;
-            params->calibOffsetX = gui->manualCalibX->value;
-            params->calibOffsetY = gui->manualCalibY->value;
-            params->calibOffsetZ = gui->manualCalibZ->value;
-            params->calibOffsetA = gui->manualCalibA->value;
-            params->calibOffsetB = gui->manualCalibB->value;
-            params->calibOffsetC = gui->manualCalibC->value;
-            params->calibScale = tracker->calibScale;
-
-            params->Save();
-            tracker->manualRecalibrate = false;
-            gui->posHbox->Show(false);
-            gui->rotHbox->Show(false);
-        }
-    }
-}
+#endif

@@ -1,42 +1,167 @@
-﻿# CMakeList.txt : CMake project for AprilTagTrackers, include source and define
-# project specific logic here.
-#
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.16)
+project(AprilTagTrackers CXX)
 
-# Find prebuilt libraries
-find_package(OpenCV REQUIRED)
-if (NOT ${OpenCV_opencv_aruco_FOUND})
-    message(FATAL_ERROR "Missing Aruco module. Rebuild OpenCV with modules from opencv_contrib")
+# main build output
+add_executable(AprilTagTrackers)
+
+# ====== Source Files ======
+
+# sources used in both testing and non testing builds
+set(ATT_TESTABLE_SOURCES
+    AprilTagWrapper.cpp
+    Helpers.cpp
+    Quaternion.cpp
+    Tracker.cpp
+    tagCustom29h10.cpp
+    ImageDrawing.cpp
+
+    tracker/OpenVRClient.cpp
+    tracker/VRDriver.cpp
+    tracker/VideoCapture.cpp
+
+    utils/Env.cpp
+    utils/Log.cpp
+    utils/LogFileHandler.cpp
+
+    serial/FileStorage.cpp
+    serial/CustomSerial.cpp
+
+    ps3eye/ps3eye.cpp
+    ps3eye/PSEyeVideoCapture.cpp
+)
+
+target_sources(AprilTagTrackers PRIVATE
+    ${ATT_TESTABLE_SOURCES}
+    MyApp.cpp
+
+    GUI.cpp
+    GUI/MainFrame.cpp
+    GUI/PreviewPane.cpp
+    GUI/FormBuilder.cpp
+    GUI/U8String.cpp
+    GUI/MatToBitmap.cpp
+)
+
+if (WIN32)
+    target_sources(AprilTagTrackers PRIVATE
+        IPC/WindowsNamedPipe.cpp
+    )
+elseif(UNIX)
+    target_sources(AprilTagTrackers PRIVATE
+        IPC/UNIXSocket.cpp
+    )
 endif()
 
-if(NOT EXISTS ${LIBUSB_LIB} )
-  message(FATAL_ERROR "Please set the correct LIBUSB library." )
+# ====== Dependencies ======
+
+# find and link dependencies
+find_package(Threads REQUIRED)
+find_package(wxWidgets CONFIG REQUIRED)
+find_package(OpenCV CONFIG REQUIRED)
+find_package(libusb CONFIG REQUIRED)
+find_package(apriltag CONFIG REQUIRED)
+find_package(openvr CONFIG REQUIRED)
+find_package(doctest CONFIG REQUIRED)
+find_package(Taskflow CONFIG REQUIRED)
+
+target_link_libraries(AprilTagTrackers PRIVATE
+    Threads::Threads
+    wx::core wx::base
+    ${OpenCV_LIBRARIES}
+    ${LIBUSB_LIBRARIES}
+    apriltag::apriltag
+    openvr::openvr_api
+    doctest::doctest
+    Taskflow::Taskflow
+    common::semver
+)
+target_include_directories(AprilTagTrackers SYSTEM PRIVATE
+    ${wxWidgets_INCLUDE_DIRS}
+    ${LIBUSB_INCLUDE_DIRS}
+)
+target_compile_definitions(AprilTagTrackers PRIVATE
+    wxDEBUG_LEVEL=$<CONFIG:Debug>
+    ${wxWidgets_DEFINITIONS}
+    "$<$<CONFIG:Debug>:${wxWidgets_DEFINITIONS_DEBUG}>"
+)
+
+# ====== Compiler Defines ======
+
+target_compile_definitions(AprilTagTrackers PRIVATE
+    ATT_DRIVER_VERSION=${DRIVER_VERSION}
+    ATT_LOG_LEVEL=${ATT_LOG_LEVEL}
+    $<$<BOOL:${ATT_DEBUG}>:ATT_DEBUG>
+)
+
+att_target_platform_definitions(AprilTagTrackers)
+
+# ====== Compiler Options ======
+
+# Set the root of includes, rather than relative
+target_include_directories(AprilTagTrackers PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+if (BUILD_SHARED_LIBS)
+    att_target_crt_linkage(AprilTagTrackers DYNAMIC)
+else()
+    att_target_crt_linkage(AprilTagTrackers STATIC)
 endif()
 
-if(NOT EXISTS "${LIBUSB_INCLUDE_DIR}/libusb.h" )
-  message(FATAL_ERROR "Please set the correct LIBUSB include directory.")
+# Ensure compiler with c++20 language features
+target_compile_features(AprilTagTrackers PRIVATE cxx_std_20)
+
+# Create debug symbols for release builds, msvc will generate a pdb,
+# while gcc-like will have embedded symbols.
+att_exe_debug_symbols(AprilTagTrackers)
+att_target_strict_conformance(AprilTagTrackers)
+if (ATT_DEBUG)
+    att_target_enable_diagnostics(AprilTagTrackers)
+    if (ATT_ENABLE_ANALYZER)
+        att_target_enable_analyzer(AprilTagTrackers)
+    endif()
 endif()
 
-# Add source to this project's executable.
-file(GLOB source "*.cpp" "*.h" "ps3eyed/*.cpp" "ps3eyed/*.h" "GUI.rc" "IPC/*.cpp" "IPC/*.h")
-add_executable (AprilTagTrackers ${source})
-
-file(COPY ${CMAKE_CURRENT_LIST_DIR}/april.ico DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/Release)
-
-# Link paths to libraries
-target_link_libraries(AprilTagTrackers PUBLIC ${OpenVR_LIB} ${LIBUSB_LIB})
-target_include_directories(AprilTagTrackers PUBLIC ${OpenVR_INCLUDE_DIR} ${LIBUSB_INCLUDE_DIR})
-
-# Link libraries defined as targets, includes are automatic
-target_link_libraries(AprilTagTrackers PUBLIC ${OpenCV_LIBS} apriltags wx::net wx::core wx::base)
-
-if (MSVC)
-    # tell the msvc linker this is a windows application
-    set_target_properties(AprilTagTrackers PROPERTIES LINK_FLAGS /SUBSYSTEM:WINDOWS)
+# Build with Address Sanitizer
+if(ATT_ENABLE_ASAN)
+    att_target_enable_asan(AprilTagTrackers)
 endif()
 
-# Install target to bin folder
-install(TARGETS AprilTagTrackers RUNTIME)
-install(FILES "${AprilTagTrackers_SOURCE_DIR}/april.ico" DESTINATION bin)
+# Precompiled std and library headers
+# target_precompile_headers(AprilTagTrackers PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pch.hpp")
 
-#target_link_libraries( AprilTagTrackers ${LIBUSB_LIB} )
+# Enable LTO
+set_target_properties(AprilTagTrackers PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+# ====== CMake Configuration ======
+
+# Install application to bin folder
+install(TARGETS AprilTagTrackers RUNTIME DESTINATION ".")
+
+if(WIN32)
+    # install pdb file for debugging
+    install(FILES $<TARGET_PDB_FILE:AprilTagTrackers> DESTINATION "." OPTIONAL)
+    # set as GUI application on windows
+    set_target_properties(AprilTagTrackers PROPERTIES WIN32_EXECUTABLE TRUE)
+    # wxWidgets will compile a resource.rc file for us
+    target_sources(AprilTagTrackers PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/resources/resource.rc")
+endif()
+
+# Make AprilTagTrackers the default target in Visual Studio
+set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT AprilTagTrackers)
+# setup file structure in IDE
+file(GLOB_RECURSE SOURCE_GROUP RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" *.cpp *.c *.tpp)
+file(GLOB_RECURSE HEADER_GROUP RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" *.hpp *.h)
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${SOURCE_GROUP})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${HEADER_GROUP})
+
+#add headers or they may not appear in IDE
+target_sources(AprilTagTrackers PRIVATE ${HEADER_GROUP})
+
+if (ENABLE_TESTING)
+    add_subdirectory("test")
+endif()
+if (ATT_ENABLE_DEBUG_DRIVER)
+    add_subdirectory("debug_driver")
+endif()

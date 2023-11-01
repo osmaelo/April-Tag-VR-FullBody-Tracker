@@ -1,30 +1,66 @@
-﻿# CMakeList.txt : Top-level CMake project file, do global configuration
-# and include sub-projects here.
-#
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required(VERSION 3.16)
 
-project("AprilTagTrackers")
+# cmake options
+# required to decide default triplet
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
-# Force wxWidgets to build as a static library
-set(wxBUILD_SHARED "0")
+include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/helpers.cmake")
 
-SET (LIBUSB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libusb-compiled/include/libusb-1.0")
-find_library(LIBUSB_LIB libusb-1.0 HINTS "${CMAKE_CURRENT_SOURCE_DIR}/libusb-compiled/VS2019/MS64/dll/" NO_DEFAULT_PATH )
+att_default_triplet(ATT_TRIPLET)
 
-# Include subprojects, but exclude them from ALL_BUILD 
-# as they may have extra unnecessary targets
-add_subdirectory("apriltag" EXCLUDE_FROM_ALL)
-add_subdirectory("wxWidgets" EXCLUDE_FROM_ALL)
-add_subdirectory("openvr" EXCLUDE_FROM_ALL)
+# setup vcpkg manifest mode, set before first project() call
+set(VCPKG_TARGET_TRIPLET "${ATT_TRIPLET}" CACHE STRING "")
+set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg-ports")
+set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg-triplets")
+set(VCPKG_INSTALL_OPTIONS "--clean-after-build" "--x-abi-tools-use-exact-versions" CACHE STRING "")
 
-# Hacky way to get openvr lib, as the main repo has been broken for months
-# TODO: fork openvr to fix build errors
-get_directory_property(PLATFORM_NAME DIRECTORY "openvr" DEFINITION "PLATFORM_NAME")
-get_directory_property(PROCESSOR_ARCH DIRECTORY "openvr" DEFINITION "PROCESSOR_ARCH")
-find_library(OpenVR_LIB openvr_api REQUIRED PATHS "${CMAKE_CURRENT_SOURCE_DIR}/openvr/lib/${PLATFORM_NAME}${PROCESSOR_ARCH}" NO_DEFAULT_PATH)
-set(OpenVR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/openvr/headers")
+# clone a local vcpkg install if user doesn't already have
+# set the toolchain file to vcpkg.cmake
+att_bootstrap_vcpkg()
 
-# Include main project
+# vcpkg stuff must be done before project
+project("April-Tag-VR-FullBody-Tracker" CXX)
+
+# on windows default install is C:\Program Files (x86)\ which requires admin perms
+# this sets it for any platform if use doesn't provide
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Install directory." FORCE)
+    message(STATUS "Installing to ${CMAKE_INSTALL_PREFIX}")
+endif()
+
+# multi config generators like Visual Studio and Ninja Multi-Config
+get_property(ATT_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT ATT_IS_MULTI_CONFIG)
+    # Set default build type to release on single config
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build Debug or Release.")
+endif()
+
+# cmake options
+option(CMAKE_EXPORT_COMPILE_COMMANDS "Create compile_commands.json (not available with VS)" ON)
+option(ENABLE_TESTING "Build and install test binary" OFF)
+
+# project options
+option(ATT_INSTALL_RESOURCES "Copy various required resources to install" ON)
+option(ATT_ENABLE_DRIVER "Build and install the BridgeDriver" ON)
+option(ATT_ENABLE_DEBUG_DRIVER "Build and install a debug/testing driver" OFF)
+option(ATT_DEBUG "Developer mode. Enable custom assert, debug logging, and debugger support. Can be used in release build." OFF)
+option(ATT_ENABLE_ANALYZER "Enable compiler static analyzers with ATT_DEBUG. CPU intensive." OFF)
+option(ATT_ENABLE_ASAN "Build with address sanitizer" OFF)
+set(ATT_LOG_LEVEL "1" CACHE STRING "0 - Silent, 1 - Info, 2 - Debug")
+option(ATT_TEST_ENABLE_ASAN "Build tests with address sanitizer" ON)
+
+# include libs in common/ for every project
+add_subdirectory("common" EXCLUDE_FROM_ALL)
+
+att_clone_submodule("BridgeDriver")
+att_read_version_file(DRIVER_VERSION "${CMAKE_CURRENT_SOURCE_DIR}/BridgeDriver/VERSION.txt")
+
 add_subdirectory("AprilTagTrackers")
+if (ATT_ENABLE_DRIVER)
+    add_subdirectory("BridgeDriver")
+endif()
 
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT AprilTagTrackers)
+# folder layout maintained
+if (ATT_INSTALL_RESOURCES)
+    install(DIRECTORY "utilities" "bindings" "locales" "images-to-print" DESTINATION ".")
+endif()

@@ -1,10 +1,5 @@
-[submodule "apriltag"]
-	path = apriltag
-	url = https://github.com/rasmusgo/apriltag.git
-	branch = fixPullRequestLibraryName
-[submodule "wxWidgets"]
-	path = wxWidgets
-	url = https://github.com/wxWidgets/wxWidgets.git
-[submodule "openvr"]
-	path = openvr
-	url = https://github.com/ValveSoftware/openvr.git
+# Our subprojects
+[submodule "BridgeDriver"]
+	path = BridgeDriver
+	url = https://github.com/ju1ce/Simple-OpenVR-Bridge-Driver
+	branch = AprilTagTrackers

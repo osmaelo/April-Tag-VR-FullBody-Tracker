@@ -1,4 +1,20 @@
-/build
-/build2
-/build3
-/.vs
+# cmake build output
+build*/
+install*/
+out*/
+
+# ide config
+.vs/
+.vscode/
+
+# .clangd
+.clang*
+# allowed clang configs for style
+!/.clang-format
+!/.clang-tidy
+
+# installed by cmake
+vcpkg/
+
+# downloaded dependencies
+deps*/
